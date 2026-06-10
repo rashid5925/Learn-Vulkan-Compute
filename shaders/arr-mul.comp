@@ -1,0 +1,19 @@
+#version 450
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+layout(binding = 0) buffer InputA {
+    float a[];
+};
+layout(binding = 1) buffer InputB {
+    float b[];
+};
+layout(binding = 2) buffer Output {
+    float c[];
+};
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    uint idy = gl_GlobalInvocationID.y;
+    c[idx * 6000 + idy] = a[idx] * b[idy];
+}
