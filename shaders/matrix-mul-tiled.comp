@@ -1,0 +1,55 @@
+#version 450
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+const uint N = 5000;
+
+layout(binding = 0) buffer InputA {
+    float a[N*N];
+};
+layout(binding = 1) buffer InputB {
+    float b[N*N];
+};
+layout(binding = 2) buffer Output {
+    float c[N*N];
+};
+
+shared float tileA[16][16];
+shared float tileB[16][16];
+
+void main() {
+    uint row = gl_GlobalInvocationID.y; 
+    uint col = gl_GlobalInvocationID.x; 
+
+    uint localY = gl_LocalInvocationID.y;
+    uint localX = gl_LocalInvocationID.x;
+
+    float sum = 0.0f;
+    uint totalTile = (N + 15) / 16;
+    for (uint i = 0; i < totalTile; ++i) {
+        uint tileCol = i * 16 + localX;
+        if (row < N && tileCol < N) {
+            tileA[localY][localX] = a[row * N + tileCol];
+        } else {
+            tileA[localY][localX] = 0.0f;
+        }
+
+        uint tileRow = i * 16 + localY;
+        if (tileRow < N && col < N) {
+            tileB[localY][localX] = b[tileRow * N + col];
+        } else {
+            tileB[localY][localX] = 0.0f;
+        }
+
+        barrier();
+
+        for (uint j = 0; j < 16; ++j) {
+            sum += tileA[localY][j] * tileB[j][localX];
+        }
+        barrier();
+    }
+
+    if (row < N && col < N) {
+        c[row * N + col] = sum;
+    }
+}
