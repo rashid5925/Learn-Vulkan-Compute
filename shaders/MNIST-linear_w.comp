@@ -1,0 +1,34 @@
+#version 450
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+layout(constant_id = 0) const uint LW1r = 10;
+layout(constant_id = 1) const uint LW1c = 10;
+layout(constant_id = 2) const uint INr = 1;
+layout(constant_id = 3) const uint INc = 1;
+
+layout(binding = 0) buffer InputA {
+    float a[LW1r*LW1c];
+};
+layout(binding = 1) buffer InputB {
+    float b[INr*INc];
+};
+layout(binding = 2) buffer Output {
+    float c[LW1r*INc];
+};
+
+void main() {
+    uint row = gl_GlobalInvocationID.y; 
+    uint col = gl_GlobalInvocationID.x; 
+    
+    if (row >= LW1r || col >= INc) {
+        return;
+    }
+
+    float sum = 0.0f;
+    for (uint i = 0; i < LW1c; ++i) {
+        sum += a[row * LW1c + i] * b[i * INc + col];
+    }
+    
+    c[row * INc + col] = sum;
+}
