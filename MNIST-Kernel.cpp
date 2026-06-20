@@ -10,10 +10,10 @@
 #include "third_party/stb_image.h"
 
 struct SpecializationData {
-    uint32_t LW1r;
-    uint32_t LW1c;
-    uint32_t INr;
-    uint32_t INc;
+    uint32_t T1r;
+    uint32_t T1c;
+    uint32_t T2r;
+    uint32_t T2c;
 };
 
 struct SpecializationDataRelu {
@@ -262,17 +262,17 @@ void createDescriptorBufferInfo(VkDescriptorBufferInfo& descriptorBufferInfo, Vk
     descriptorBufferInfo.offset = offset;
 }
 
-void createSpecializationMapEntries(VkSpecializationInfo* specializationInfoL, SpecializationData& specDataL, VkSpecializationMapEntry (&specializationMapEntriesL)[4], uint32_t LW1r, uint32_t LW1c, uint32_t INr, uint32_t INc)
+void createSpecializationMapEntries(VkSpecializationInfo* specializationInfoL, SpecializationData& specDataL, VkSpecializationMapEntry (&specializationMapEntriesL)[4], uint32_t T1r, uint32_t T1c, uint32_t T2r, uint32_t T2c)
 {
-    specDataL.LW1r = LW1r;
-    specDataL.LW1c = LW1c;
-    specDataL.INr = INr;
-    specDataL.INc = INc;
+    specDataL.T1r = T1r;
+    specDataL.T1c = T1c;
+    specDataL.T2r = T2r;
+    specDataL.T2c = T2c;
 
-    specializationMapEntriesL[0] = { 0, offsetof(SpecializationData, LW1r), sizeof(uint32_t) };
-    specializationMapEntriesL[1] = { 1, offsetof(SpecializationData, LW1c), sizeof(uint32_t) };
-    specializationMapEntriesL[2] = { 2, offsetof(SpecializationData, INr),  sizeof(uint32_t) };
-    specializationMapEntriesL[3] = { 3, offsetof(SpecializationData, INc),  sizeof(uint32_t) };
+    specializationMapEntriesL[0] = { 0, offsetof(SpecializationData, T1r), sizeof(uint32_t) };
+    specializationMapEntriesL[1] = { 1, offsetof(SpecializationData, T1c), sizeof(uint32_t) };
+    specializationMapEntriesL[2] = { 2, offsetof(SpecializationData, T2r),  sizeof(uint32_t) };
+    specializationMapEntriesL[3] = { 3, offsetof(SpecializationData, T2c),  sizeof(uint32_t) };
 
     specializationInfoL->mapEntryCount = 4;
     specializationInfoL->pMapEntries   = specializationMapEntriesL;
@@ -294,529 +294,304 @@ void createSpecializationMapEntriesRelu(VkSpecializationInfo* specializationInfo
     specializationInfoL->pData         = &specDataL;
 }
 
-std::vector<float> linearW(VkDevice device, VkPhysicalDevice physicalDevice, VkQueue queue, uint32_t queueFamilyIndex, VkResult res, const std::vector<float>& linear1_w, const std::vector<float>& input_tensor, uint32_t LW1r, uint32_t LW1c, uint32_t INr, uint32_t INc) {
-    const uint outputSize = LW1r * INc;
-    const uint32_t bufferSize = (linear1_w.size() + input_tensor.size() + outputSize) * sizeof(float);
-
+void initializeBufferMemDesc(
+    VkDevice device, 
+    VkPhysicalDevice physicalDevice, 
+    VkQueue queue,
+    uint32_t queueFamilyIndex,
+    uint32_t bufferSize,
+    VkResult res, 
+    const std::vector<float>& linear1_w, 
+    const std::vector<float>& input_tensor, 
+    const std::vector<float>& linear1_b,
+    const std::vector<float>& linear2_w, 
+    const std::vector<float>& linear2_b,
+    uint32_t outputSizeL1,
+    uint32_t outputSizeL2,
+    VkBuffer& buffer,        
+    VkDeviceMemory& memory   
+) {
     VkBufferCreateInfo localBufferCreateInfo{};
     VkBuffer stagingBuffer{};
     VkDeviceMemory stagingMemory{};
     createBuffer(localBufferCreateInfo, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, stagingBuffer, device, bufferSize, res);
     createMemory(device, physicalDevice, stagingBuffer, stagingMemory, res);
-
     res = vkBindBufferMemory(device, stagingBuffer, stagingMemory, 0);
     assert(res == VK_SUCCESS);
 
     VkBufferCreateInfo bufferCreateInfo{};
-    VkBuffer buffer{};
-    VkDeviceMemory memory{};
-    createBuffer(bufferCreateInfo, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, buffer, device, bufferSize, res);
+    createBuffer(bufferCreateInfo, VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, buffer, device, bufferSize, res);
     createMemory(device, physicalDevice, buffer, memory, res);
-
     res = vkBindBufferMemory(device, buffer, memory, 0);
     assert(res == VK_SUCCESS);
 
-    VkDescriptorSetLayoutBinding descriptorSetLayoutBindingLW1{};
-    VkDescriptorSetLayoutBinding descriptorSetLayoutBindingT{};
+    void* mappedData;
+    vkMapMemory(device, stagingMemory, 0, bufferSize, 0, &mappedData);
+
+    size_t offset = 0;
+    memcpy((char*)mappedData + offset, linear1_w.data(), linear1_w.size() * sizeof(float));
+    
+    offset += linear1_w.size() * sizeof(float);
+    memcpy((char*)mappedData + offset, input_tensor.data(), input_tensor.size() * sizeof(float));
+    
+    offset += input_tensor.size() * sizeof(float);
+    offset += outputSizeL1 * sizeof(float); 
+    memcpy((char*)mappedData + offset, linear1_b.data(), linear1_b.size() * sizeof(float));
+    
+    offset += linear1_b.size() * sizeof(float);
+    memcpy((char*)mappedData + offset, linear2_w.data(), linear2_w.size() * sizeof(float));
+    
+    offset += linear2_w.size() * sizeof(float);
+    memcpy((char*)mappedData + offset, linear2_b.data(), linear2_b.size() * sizeof(float));
+    
+    vkUnmapMemory(device, stagingMemory);
+
+    VkCommandPoolCreateInfo commandPoolCreateInfo{};
+    commandPoolCreateInfo.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+    commandPoolCreateInfo.queueFamilyIndex = queueFamilyIndex;
+    VkCommandPool commandPool{};
+    res = vkCreateCommandPool(device, &commandPoolCreateInfo, nullptr, &commandPool);
+    assert(res == VK_SUCCESS);
+
+    VkCommandBufferAllocateInfo commandBufferAllocateInfo{};
+    commandBufferAllocateInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+    commandBufferAllocateInfo.commandPool = commandPool;
+    commandBufferAllocateInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    commandBufferAllocateInfo.commandBufferCount = 1;
+    VkCommandBuffer commandBuffer{};
+    res = vkAllocateCommandBuffers(device, &commandBufferAllocateInfo, &commandBuffer);
+    assert(res == VK_SUCCESS);
+
+    VkCommandBufferBeginInfo beginInfo{};
+    beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    res = vkBeginCommandBuffer(commandBuffer, &beginInfo);
+    assert(res == VK_SUCCESS);
+
+    VkBufferCopy copyRegion{};
+    copyRegion.srcOffset = 0;
+    copyRegion.dstOffset = 0;
+    copyRegion.size = bufferSize;
+    vkCmdCopyBuffer(commandBuffer, stagingBuffer, buffer, 1, &copyRegion);
+
+    res = vkEndCommandBuffer(commandBuffer);
+    assert(res == VK_SUCCESS);
+
+    VkSubmitInfo submitInfo{};
+    submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    submitInfo.commandBufferCount = 1;
+    submitInfo.pCommandBuffers = &commandBuffer;
+
+    VkFenceCreateInfo fenceCreateInfo{};
+    fenceCreateInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+    VkFence fence{};
+    res = vkCreateFence(device, &fenceCreateInfo, nullptr, &fence);
+    assert(res == VK_SUCCESS);
+
+    res = vkQueueSubmit(queue, 1, &submitInfo, fence);
+    assert(res == VK_SUCCESS);
+    res = vkWaitForFences(device, 1, &fence, VK_TRUE, 100000000000);
+    assert(res == VK_SUCCESS);
+
+    vkDestroyFence(device, fence, nullptr);
+    vkDestroyCommandPool(device, commandPool, nullptr);
+}
+
+void createDescriptorSetLinear(
+    VkDevice device, 
+    VkDescriptorSetLayout &descriptorSetLayout, 
+    VkDescriptorPool descriptorPool, 
+    VkDescriptorSet& descriptorSet, 
+    VkDescriptorSetAllocateInfo &descriptorSetAllocateInfo,
+    VkResult res
+) {
+    VkDescriptorSetLayoutBinding descriptorSetLayoutBindingT1{};
+    VkDescriptorSetLayoutBinding descriptorSetLayoutBindingT2{};
     VkDescriptorSetLayoutBinding descriptorSetLayoutBindingOutput{};
 
-    createDescriptorLayoutBinding(descriptorSetLayoutBindingLW1, 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_COMPUTE_BIT);
-    createDescriptorLayoutBinding(descriptorSetLayoutBindingT, 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_COMPUTE_BIT);
+    createDescriptorLayoutBinding(descriptorSetLayoutBindingT1, 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_COMPUTE_BIT);
+    createDescriptorLayoutBinding(descriptorSetLayoutBindingT2, 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_COMPUTE_BIT);
     createDescriptorLayoutBinding(descriptorSetLayoutBindingOutput, 2, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_COMPUTE_BIT);
 
     VkDescriptorSetLayoutBinding descriptorSetLayoutBindingsL[3] = {
-        descriptorSetLayoutBindingLW1,
-        descriptorSetLayoutBindingT,
-        descriptorSetLayoutBindingOutput,
+        descriptorSetLayoutBindingT1,
+        descriptorSetLayoutBindingT2,
+        descriptorSetLayoutBindingOutput
     };
 
-    VkDescriptorSetLayout descriptorSetLayout{};
     createDescriptorSetLayout(device, descriptorSetLayoutBindingsL, 3, descriptorSetLayout, res);
 
-    VkDescriptorPool descriptorPool{};
     createDescriptorPool(device, descriptorPool, 3,res);
 
-    VkDescriptorSet descriptorSet{};
-
-    VkDescriptorSetAllocateInfo descriptorSetAllocateInfo = {};
     descriptorSetAllocateInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO; 
     descriptorSetAllocateInfo.descriptorPool = descriptorPool; 
     descriptorSetAllocateInfo.descriptorSetCount = 1; 
     descriptorSetAllocateInfo.pSetLayouts = &descriptorSetLayout;
-
-
-    VkDescriptorBufferInfo descriptorBufferInfoLW1;
-    VkDescriptorBufferInfo descriptorBufferInfoInputTensor;
-    VkDescriptorBufferInfo descriptorBufferInfoOutput;
-    createDescriptorBufferInfo(descriptorBufferInfoLW1, buffer, linear1_w.size() * sizeof(float), 0);
-    createDescriptorBufferInfo(descriptorBufferInfoInputTensor, buffer, input_tensor.size() * sizeof(float), linear1_w.size() * sizeof(float));
-    createDescriptorBufferInfo(descriptorBufferInfoOutput, buffer, outputSize * sizeof(float), (input_tensor.size() + linear1_w.size()) * sizeof(float));
-
-    std::vector<VkDescriptorBufferInfo> descriptorBufferInfosL {
-        descriptorBufferInfoLW1,
-        descriptorBufferInfoInputTensor,
-        descriptorBufferInfoOutput,
-    };
-
-    res = vkAllocateDescriptorSets(device, &descriptorSetAllocateInfo, &descriptorSet);
-    assert(res == VK_SUCCESS);
-
-    std::vector<VkWriteDescriptorSet> writeDescriptorSetL(3, VkWriteDescriptorSet{});
-    for (uint32_t i = 0; i < writeDescriptorSetL.size(); ++i) {
-        writeDescriptorSetL[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-        writeDescriptorSetL[i].dstSet = descriptorSet; 
-        writeDescriptorSetL[i].dstBinding = i; 
-        writeDescriptorSetL[i].descriptorCount = 1; 
-        writeDescriptorSetL[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER; 
-        writeDescriptorSetL[i].pBufferInfo = &descriptorBufferInfosL[i];
-    }
-
-    vkUpdateDescriptorSets(device, 3, writeDescriptorSetL.data(), 0, NULL);
-
-    // 2. Map and transfer the flat buffer smoothly
-    void* mappedData;
-    vkMapMemory(device, stagingMemory, 0, bufferSize, 0, &mappedData);
-    memcpy(mappedData, linear1_w.data(), linear1_w.size() * sizeof(float));
-    memcpy((char*)mappedData + linear1_w.size() * sizeof(float), input_tensor.data(), input_tensor.size() * sizeof(float));
-    vkUnmapMemory(device, stagingMemory);
-
-    auto computeShaderCodeL = readSPV("MNIST-linear_w.spv");
-
-    VkShaderModule shaderModuleL{};
-    VkShaderModuleCreateInfo shaderModuleCreateInfoL{};
-    shaderModuleCreateInfoL.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
-    shaderModuleCreateInfoL.codeSize = computeShaderCodeL.size();
-    shaderModuleCreateInfoL.pCode = reinterpret_cast<const uint32_t*>(computeShaderCodeL.data());
-    res = vkCreateShaderModule(device, &shaderModuleCreateInfoL, nullptr, &shaderModuleL);
-    assert(res == VK_SUCCESS);
-
-    SpecializationData specDataL{};
-    VkSpecializationMapEntry specializationMapEntriesL[4]{};
-    VkSpecializationInfo specializationInfoL{};
-    createSpecializationMapEntries(&specializationInfoL, specDataL, specializationMapEntriesL, LW1r, LW1c, INr, INc);
-
-    VkPipelineShaderStageCreateInfo shaderStageCreateInfoL{};
-    shaderStageCreateInfoL.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-    shaderStageCreateInfoL.stage = VK_SHADER_STAGE_COMPUTE_BIT;
-    shaderStageCreateInfoL.module = shaderModuleL;
-    shaderStageCreateInfoL.pName = "main";
-    shaderStageCreateInfoL.pSpecializationInfo = &specializationInfoL;
-
-    VkPipelineLayout pipelineLayoutL{};
-    VkPipelineLayoutCreateInfo pipelineLayoutCreateInfo{};
-    pipelineLayoutCreateInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
-    pipelineLayoutCreateInfo.setLayoutCount = 1;
-    pipelineLayoutCreateInfo.pSetLayouts = &descriptorSetLayout;
-    res = vkCreatePipelineLayout(device, &pipelineLayoutCreateInfo, nullptr, &pipelineLayoutL);
-    assert(res == VK_SUCCESS);
-
-    VkPipeline pipeline{};
-    VkComputePipelineCreateInfo computePipelineCreateInfo{};
-    computePipelineCreateInfo.stage = shaderStageCreateInfoL;
-    computePipelineCreateInfo.layout = pipelineLayoutL;
-    computePipelineCreateInfo.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
-    res = vkCreateComputePipelines(device, NULL, 1, &computePipelineCreateInfo, nullptr, &pipeline);
-    assert(res == VK_SUCCESS);
-
-    VkCommandPool commandPool{};
-    VkCommandPoolCreateInfo commandPoolCreateInfo{};
-    commandPoolCreateInfo.queueFamilyIndex = queueFamilyIndex;
-    commandPoolCreateInfo.flags = 0;
-    commandPoolCreateInfo.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
-    res = vkCreateCommandPool(device, &commandPoolCreateInfo, nullptr, &commandPool);
-    assert(res == VK_SUCCESS);
-
-    VkCommandBufferAllocateInfo commandBufferAllocateInfo{};
-    commandBufferAllocateInfo.commandBufferCount = 1;
-    commandBufferAllocateInfo.commandPool = commandPool;
-    commandBufferAllocateInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-    commandBufferAllocateInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
-
-    VkCommandBuffer commandBuffer{};
-    res = vkAllocateCommandBuffers(device, &commandBufferAllocateInfo, &commandBuffer);
-    assert(res == VK_SUCCESS);
-
-    VkCommandBufferBeginInfo commandBufferBeginInfo{};
-    commandBufferBeginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-    commandBufferBeginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-    res = vkBeginCommandBuffer(commandBuffer, &commandBufferBeginInfo);
-    assert(res == VK_SUCCESS);
-
-    VkBufferCopy copyRegion{};
-    copyRegion.srcOffset = 0;
-    copyRegion.dstOffset = 0;
-    copyRegion.size = bufferSize;
-    vkCmdCopyBuffer(commandBuffer, stagingBuffer, buffer, 1, &copyRegion);
-
-    vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
-    vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipelineLayoutL, 0, 1, &descriptorSet, 0, NULL);
-
-    vkCmdDispatch(commandBuffer, (INc + 15) / 16, (LW1r + 15) / 16, 1);
-    res = vkEndCommandBuffer(commandBuffer);
-    assert(res == VK_SUCCESS);
-
-    VkSubmitInfo submitInfo{};
-    submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-    submitInfo.commandBufferCount = 1;
-    submitInfo.pCommandBuffers = &commandBuffer;
-
-    VkFence fence{};
-    VkFenceCreateInfo fenceCreateInfo{};
-    fenceCreateInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
-    fenceCreateInfo.flags = 0;
-    res = vkCreateFence(device, &fenceCreateInfo, nullptr, &fence);
-    assert(res == VK_SUCCESS);
-
-    res = vkQueueSubmit(queue, 1, &submitInfo, fence);
-    assert(res == VK_SUCCESS);
-
-    res = vkWaitForFences(device, 1, &fence, VK_TRUE, 100000000000);
-    assert(res == VK_SUCCESS);
-
-    vkDestroyFence(device, fence, nullptr);
-
-    void* mappedMemory = NULL;
-    vkMapMemory(device, memory, 0, bufferSize, 0, &mappedMemory);
-    float* mappedResults = (float*)((char*)mappedMemory + ((linear1_w.size() + input_tensor.size()) * sizeof(float)));
-
-    std::vector<float> result(mappedResults, mappedResults + outputSize);
-    
-    return result;
 }
 
-std::vector<float> linearB(VkDevice device, VkPhysicalDevice physicalDevice, VkQueue queue, uint32_t queueFamilyIndex, VkResult res, const std::vector<float>& linear1_b, const std::vector<float>& linear1_o, uint32_t LB1r, uint32_t LB1c, uint32_t LOr, uint32_t LOc) {
-    const uint outputSize = LOr * LOc;
-    const uint32_t bufferSize = (linear1_b.size() + linear1_o.size() + outputSize) * sizeof(float);
+void createDescriptorSetRelu(
+    VkDevice device, 
+    VkDescriptorSetLayout &descriptorSetLayout, 
+    VkDescriptorPool descriptorPool, 
+    VkDescriptorSet& descriptorSet, 
+    VkDescriptorSetAllocateInfo &descriptorSetAllocateInfo,
+    VkResult res
+) {
+    VkDescriptorSetLayoutBinding descriptorSetLayoutBindingT1{};
 
-    VkBufferCreateInfo localBufferCreateInfo{};
-    VkBuffer stagingBuffer{};
-    VkDeviceMemory stagingMemory{};
-    createBuffer(localBufferCreateInfo, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, stagingBuffer, device, bufferSize, res);
-    createMemory(device, physicalDevice, stagingBuffer, stagingMemory, res);
+    createDescriptorLayoutBinding(descriptorSetLayoutBindingT1, 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_COMPUTE_BIT);
 
-    res = vkBindBufferMemory(device, stagingBuffer, stagingMemory, 0);
-    assert(res == VK_SUCCESS);
-
-    VkBufferCreateInfo bufferCreateInfo{};
-    VkBuffer buffer{};
-    VkDeviceMemory memory{};
-    createBuffer(bufferCreateInfo, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, buffer, device, bufferSize, res);
-    createMemory(device, physicalDevice, buffer, memory, res);
-
-    res = vkBindBufferMemory(device, buffer, memory, 0);
-    assert(res == VK_SUCCESS);
-
-    VkDescriptorSetLayoutBinding descriptorSetLayoutBindingLB1{};
-    VkDescriptorSetLayoutBinding descriptorSetLayoutBindingT{};
-    VkDescriptorSetLayoutBinding descriptorSetLayoutBindingOutput{};
-
-    createDescriptorLayoutBinding(descriptorSetLayoutBindingLB1, 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_COMPUTE_BIT);
-    createDescriptorLayoutBinding(descriptorSetLayoutBindingT, 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_COMPUTE_BIT);
-    createDescriptorLayoutBinding(descriptorSetLayoutBindingOutput, 2, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_COMPUTE_BIT);
-
-    VkDescriptorSetLayoutBinding descriptorSetLayoutBindingsL[3] = {
-        descriptorSetLayoutBindingLB1,
-        descriptorSetLayoutBindingT,
-        descriptorSetLayoutBindingOutput,
+    VkDescriptorSetLayoutBinding descriptorSetLayoutBindingsL[1] = {
+        descriptorSetLayoutBindingT1,
     };
 
-    VkDescriptorSetLayout descriptorSetLayout{};
-    createDescriptorSetLayout(device, descriptorSetLayoutBindingsL, 3, descriptorSetLayout, res);
+    createDescriptorSetLayout(device, descriptorSetLayoutBindingsL, 1, descriptorSetLayout, res);
 
-    VkDescriptorPool descriptorPool{};
-    createDescriptorPool(device, descriptorPool, 3, res);
-
-    VkDescriptorSet descriptorSet{};
-
-    VkDescriptorSetAllocateInfo descriptorSetAllocateInfo = {};
-    descriptorSetAllocateInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO; 
-    descriptorSetAllocateInfo.descriptorPool = descriptorPool; 
-    descriptorSetAllocateInfo.descriptorSetCount = 1; 
-    descriptorSetAllocateInfo.pSetLayouts = &descriptorSetLayout;
-
-    VkDescriptorBufferInfo descriptorBufferInfoLB1;
-    VkDescriptorBufferInfo descriptorBufferInfoLO;
-    VkDescriptorBufferInfo descriptorBufferInfoOutput;
-    createDescriptorBufferInfo(descriptorBufferInfoLB1, buffer, linear1_b.size() * sizeof(float), 0);
-    createDescriptorBufferInfo(descriptorBufferInfoLO, buffer, outputSize * sizeof(float), linear1_b.size() * sizeof(float));
-    createDescriptorBufferInfo(descriptorBufferInfoOutput, buffer, outputSize * sizeof(float), (linear1_o.size() + linear1_b.size()) * sizeof(float));
-
-    std::vector<VkDescriptorBufferInfo> descriptorBufferInfosL {
-        descriptorBufferInfoLB1,
-        descriptorBufferInfoLO,
-        descriptorBufferInfoOutput,
-    };
-
-    res = vkAllocateDescriptorSets(device, &descriptorSetAllocateInfo, &descriptorSet);
-    assert(res == VK_SUCCESS);
-
-    std::vector<VkWriteDescriptorSet> writeDescriptorSetL(3, VkWriteDescriptorSet{});
-    for (uint32_t i = 0; i < writeDescriptorSetL.size(); ++i) {
-        writeDescriptorSetL[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-        writeDescriptorSetL[i].dstSet = descriptorSet; 
-        writeDescriptorSetL[i].dstBinding = i; 
-        writeDescriptorSetL[i].descriptorCount = 1; 
-        writeDescriptorSetL[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER; 
-        writeDescriptorSetL[i].pBufferInfo = &descriptorBufferInfosL[i];
-    }
-
-    vkUpdateDescriptorSets(device, 3, writeDescriptorSetL.data(), 0, NULL);
-
-    // 2. Map and transfer the flat buffer smoothly
-    void* mappedData;
-    vkMapMemory(device, stagingMemory, 0, bufferSize, 0, &mappedData);
-    memcpy(mappedData, linear1_b.data(), linear1_b.size() * sizeof(float));
-    memcpy((char*)mappedData + linear1_b.size() * sizeof(float), linear1_o.data(), linear1_o.size() * sizeof(float));
-    vkUnmapMemory(device, stagingMemory);
-
-    auto computeShaderCodeL = readSPV("MNIST-linear1_b.spv");
-
-    VkShaderModule shaderModuleL{};
-    VkShaderModuleCreateInfo shaderModuleCreateInfoL{};
-    shaderModuleCreateInfoL.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
-    shaderModuleCreateInfoL.codeSize = computeShaderCodeL.size();
-    shaderModuleCreateInfoL.pCode = reinterpret_cast<const uint32_t*>(computeShaderCodeL.data());
-    res = vkCreateShaderModule(device, &shaderModuleCreateInfoL, nullptr, &shaderModuleL);
-    assert(res == VK_SUCCESS);
-
-    SpecializationData specDataL{};
-    VkSpecializationMapEntry specializationMapEntriesL[4]{};
-    VkSpecializationInfo specializationInfoL{};
-    createSpecializationMapEntries(&specializationInfoL, specDataL, specializationMapEntriesL, LB1r, LB1c, LOr, LOc);
-
-    VkPipelineShaderStageCreateInfo shaderStageCreateInfoL{};
-    shaderStageCreateInfoL.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-    shaderStageCreateInfoL.stage = VK_SHADER_STAGE_COMPUTE_BIT;
-    shaderStageCreateInfoL.module = shaderModuleL;
-    shaderStageCreateInfoL.pName = "main";
-    shaderStageCreateInfoL.pSpecializationInfo = &specializationInfoL;
-
-    VkPipelineLayout pipelineLayoutL{};
-    VkPipelineLayoutCreateInfo pipelineLayoutCreateInfo{};
-    pipelineLayoutCreateInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
-    pipelineLayoutCreateInfo.setLayoutCount = 1;
-    pipelineLayoutCreateInfo.pSetLayouts = &descriptorSetLayout;
-    res = vkCreatePipelineLayout(device, &pipelineLayoutCreateInfo, nullptr, &pipelineLayoutL);
-    assert(res == VK_SUCCESS);
-
-    VkPipeline pipeline{};
-    VkComputePipelineCreateInfo computePipelineCreateInfo{};
-    computePipelineCreateInfo.stage = shaderStageCreateInfoL;
-    computePipelineCreateInfo.layout = pipelineLayoutL;
-    computePipelineCreateInfo.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
-    res = vkCreateComputePipelines(device, NULL, 1, &computePipelineCreateInfo, nullptr, &pipeline);
-    assert(res == VK_SUCCESS);
-
-    VkCommandPool commandPool{};
-    VkCommandPoolCreateInfo commandPoolCreateInfo{};
-    commandPoolCreateInfo.queueFamilyIndex = queueFamilyIndex;
-    commandPoolCreateInfo.flags = 0;
-    commandPoolCreateInfo.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
-    res = vkCreateCommandPool(device, &commandPoolCreateInfo, nullptr, &commandPool);
-    assert(res == VK_SUCCESS);
-
-    VkCommandBufferAllocateInfo commandBufferAllocateInfo{};
-    commandBufferAllocateInfo.commandBufferCount = 1;
-    commandBufferAllocateInfo.commandPool = commandPool;
-    commandBufferAllocateInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-    commandBufferAllocateInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
-
-    VkCommandBuffer commandBuffer{};
-    res = vkAllocateCommandBuffers(device, &commandBufferAllocateInfo, &commandBuffer);
-    assert(res == VK_SUCCESS);
-
-    VkCommandBufferBeginInfo commandBufferBeginInfo{};
-    commandBufferBeginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-    commandBufferBeginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-    res = vkBeginCommandBuffer(commandBuffer, &commandBufferBeginInfo);
-    assert(res == VK_SUCCESS);
-
-    VkBufferCopy copyRegion{};
-    copyRegion.srcOffset = 0;
-    copyRegion.dstOffset = 0;
-    copyRegion.size = bufferSize;
-    vkCmdCopyBuffer(commandBuffer, stagingBuffer, buffer, 1, &copyRegion);
-
-    vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
-    vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipelineLayoutL, 0, 1, &descriptorSet, 0, NULL);
-
-    vkCmdDispatch(commandBuffer, (LOc + 15) / 16, (LB1r + 15) / 16, 1);
-    res = vkEndCommandBuffer(commandBuffer);
-    assert(res == VK_SUCCESS);
-
-    VkSubmitInfo submitInfo{};
-    submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-    submitInfo.commandBufferCount = 1;
-    submitInfo.pCommandBuffers = &commandBuffer;
-
-    VkFence fence{};
-    VkFenceCreateInfo fenceCreateInfo{};
-    fenceCreateInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
-    fenceCreateInfo.flags = 0;
-    res = vkCreateFence(device, &fenceCreateInfo, nullptr, &fence);
-    assert(res == VK_SUCCESS);
-
-    res = vkQueueSubmit(queue, 1, &submitInfo, fence);
-    assert(res == VK_SUCCESS);
-
-    res = vkWaitForFences(device, 1, &fence, VK_TRUE, 100000000000);
-    assert(res == VK_SUCCESS);
-
-    vkDestroyFence(device, fence, nullptr);
-
-    void* mappedMemory = NULL;
-    vkMapMemory(device, memory, 0, bufferSize, 0, &mappedMemory);
-    float* mappedResults = (float*)((char*)mappedMemory + ((linear1_b.size() + linear1_o.size()) * sizeof(float)));
-
-    std::vector<float> result(mappedResults, mappedResults + outputSize);
-    
-    return result;
-}
-
-std::vector<float> relu(VkDevice device, VkPhysicalDevice physicalDevice, VkQueue queue, uint32_t queueFamilyIndex, VkResult res, const std::vector<float>& linear1_o, uint32_t LOr, uint32_t LOc) {
-    const uint outputSize = linear1_o.size();
-    const uint32_t bufferSize = linear1_o.size() * sizeof(float);
-
-    VkBufferCreateInfo localBufferCreateInfo{};
-    VkBuffer stagingBuffer{};
-    VkDeviceMemory stagingMemory{};
-    createBuffer(localBufferCreateInfo, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, stagingBuffer, device, bufferSize, res);
-    createMemory(device, physicalDevice, stagingBuffer, stagingMemory, res);
-
-    res = vkBindBufferMemory(device, stagingBuffer, stagingMemory, 0);
-    assert(res == VK_SUCCESS);
-
-    VkBufferCreateInfo bufferCreateInfo{};
-    VkBuffer buffer{};
-    VkDeviceMemory memory{};
-    createBuffer(bufferCreateInfo, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, buffer, device, bufferSize, res);
-    createMemory(device, physicalDevice, buffer, memory, res);
-
-    res = vkBindBufferMemory(device, buffer, memory, 0);
-    assert(res == VK_SUCCESS);
-
-    VkDescriptorSetLayoutBinding descriptorSetLayoutBindingRelu{};
-
-    createDescriptorLayoutBinding(descriptorSetLayoutBindingRelu, 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_COMPUTE_BIT);
-
-    VkDescriptorSetLayoutBinding descriptorSetLayoutBindingsRelu[1] = {
-        descriptorSetLayoutBindingRelu,
-    };
-
-    VkDescriptorSetLayout descriptorSetLayout{};
-    createDescriptorSetLayout(device, descriptorSetLayoutBindingsRelu, 1, descriptorSetLayout, res);
-
-    VkDescriptorPool descriptorPool{};
     createDescriptorPool(device, descriptorPool, 1, res);
 
-    VkDescriptorSet descriptorSet{};
-
-    VkDescriptorSetAllocateInfo descriptorSetAllocateInfo = {};
     descriptorSetAllocateInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO; 
     descriptorSetAllocateInfo.descriptorPool = descriptorPool; 
     descriptorSetAllocateInfo.descriptorSetCount = 1; 
     descriptorSetAllocateInfo.pSetLayouts = &descriptorSetLayout;
+}
 
-    VkDescriptorBufferInfo descriptorBufferInfoRelu;
-    createDescriptorBufferInfo(descriptorBufferInfoRelu, buffer, linear1_o.size() * sizeof(float), 0);
+void updateDescriptorSetLinear(
+    VkDevice device,
+    VkDescriptorSet descriptorSet,
+    VkBuffer buffer,
+    uint32_t t1Size, uint32_t t1Offset,
+    uint32_t t2Size, uint32_t t2Offset,
+    uint32_t outputSize, uint32_t outputOffset
+) {
+    VkDescriptorBufferInfo bufferInfos[3];
+    createDescriptorBufferInfo(bufferInfos[0], buffer, t1Size * sizeof(float), t1Offset * sizeof(float));
+    createDescriptorBufferInfo(bufferInfos[1], buffer, t2Size * sizeof(float), t2Offset * sizeof(float));
+    createDescriptorBufferInfo(bufferInfos[2], buffer, outputSize * sizeof(float), outputOffset * sizeof(float));
 
-    std::vector<VkDescriptorBufferInfo> descriptorBufferInfosRelu {
-        descriptorBufferInfoRelu,
-    };
-
-    res = vkAllocateDescriptorSets(device, &descriptorSetAllocateInfo, &descriptorSet);
-    assert(res == VK_SUCCESS);
-
-    std::vector<VkWriteDescriptorSet> writeDescriptorSetRelu(1, VkWriteDescriptorSet{});
-    for (uint32_t i = 0; i < writeDescriptorSetRelu.size(); ++i) {
-        writeDescriptorSetRelu[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-        writeDescriptorSetRelu[i].dstSet = descriptorSet; 
-        writeDescriptorSetRelu[i].dstBinding = i; 
-        writeDescriptorSetRelu[i].descriptorCount = 1; 
-        writeDescriptorSetRelu[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER; 
-        writeDescriptorSetRelu[i].pBufferInfo = &descriptorBufferInfosRelu[i];
+    VkWriteDescriptorSet writes[3]{};
+    for (uint32_t i = 0; i < 3; ++i) {
+        writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        writes[i].dstSet = descriptorSet;
+        writes[i].dstBinding = i;
+        writes[i].descriptorCount = 1;
+        writes[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        writes[i].pBufferInfo = &bufferInfos[i];
     }
 
-    vkUpdateDescriptorSets(device, 1, writeDescriptorSetRelu.data(), 0, NULL);
+    vkUpdateDescriptorSets(device, 3, writes, 0, nullptr);
+}
 
-    // 2. Map and transfer the flat buffer smoothly
-    void* mappedData;
-    vkMapMemory(device, stagingMemory, 0, bufferSize, 0, &mappedData);
-    memcpy(mappedData, linear1_o.data(), linear1_o.size() * sizeof(float));
-    vkUnmapMemory(device, stagingMemory);
+void updateDescriptorSetRelu(
+    VkDevice device,
+    VkDescriptorSet descriptorSet,
+    VkBuffer buffer,
+    uint32_t t1Size, uint32_t t1Offset
+) {
+    VkDescriptorBufferInfo bufferInfoT1;
+    createDescriptorBufferInfo(bufferInfoT1, buffer, t1Size * sizeof(float), t1Offset * sizeof(float));
 
-    auto computeShaderCodeRelu = readSPV("MNIST-ReLU.spv");
+    VkWriteDescriptorSet write{};
+    write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    write.dstSet = descriptorSet;
+    write.dstBinding = 0;
+    write.descriptorCount = 1;
+    write.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    write.pBufferInfo = &bufferInfoT1;
 
-    VkShaderModule shaderModuleRelu{};
-    VkShaderModuleCreateInfo shaderModuleCreateInfoRelu{};
-    shaderModuleCreateInfoRelu.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
-    shaderModuleCreateInfoRelu.codeSize = computeShaderCodeRelu.size();
-    shaderModuleCreateInfoRelu.pCode = reinterpret_cast<const uint32_t*>(computeShaderCodeRelu.data());
-    res = vkCreateShaderModule(device, &shaderModuleCreateInfoRelu, nullptr, &shaderModuleRelu);
+    vkUpdateDescriptorSets(device, 1, &write, 0, nullptr);
+}
+
+void linearOperation(
+    const std::string& shader_file_name,
+    VkBuffer &buffer, 
+    VkDeviceMemory &memory, 
+    VkBuffer &stagingBuffer, 
+    VkDevice device, 
+    const uint32_t bufferSize, 
+    VkPhysicalDevice physicalDevice, 
+    VkQueue queue, 
+    VkDescriptorSetLayout descriptorSetLayout, 
+    VkDescriptorSet& descriptorSet, 
+    VkDescriptorSetAllocateInfo descriptorSetAllocateInfo,
+    uint32_t queueFamilyIndex, 
+    VkResult res, 
+    uint32_t t1Size, 
+    uint32_t t1Offset,
+    uint32_t t2Size,
+    uint32_t t2Offset,
+    uint32_t outputSize,
+    uint32_t outputOffset,
+    uint32_t T1r, 
+    uint32_t T1c, 
+    uint32_t T2r, 
+    uint32_t T2c
+) {
+    updateDescriptorSetLinear(device, descriptorSet, buffer, t1Size, t1Offset, t2Size, t2Offset, outputSize, outputOffset);
+
+    auto computeShaderCodeL = readSPV(shader_file_name);
+
+    VkShaderModule shaderModuleL{};
+    VkShaderModuleCreateInfo shaderModuleCreateInfoL{};
+    shaderModuleCreateInfoL.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+    shaderModuleCreateInfoL.codeSize = computeShaderCodeL.size();
+    shaderModuleCreateInfoL.pCode = reinterpret_cast<const uint32_t*>(computeShaderCodeL.data());
+    res = vkCreateShaderModule(device, &shaderModuleCreateInfoL, nullptr, &shaderModuleL);
     assert(res == VK_SUCCESS);
 
-    SpecializationDataRelu specDataRelu{};
-    VkSpecializationMapEntry specializationMapEntriesRelu[2]{};
-    VkSpecializationInfo specializationInfoRelu{};
-    createSpecializationMapEntriesRelu(&specializationInfoRelu, specDataRelu, specializationMapEntriesRelu, LOr, LOc);
+    SpecializationData specDataL{};
+    VkSpecializationMapEntry specializationMapEntriesL[4]{};
+    VkSpecializationInfo specializationInfoL{};
+    createSpecializationMapEntries(&specializationInfoL, specDataL, specializationMapEntriesL, T1r, T1c, T2r, T2c);
 
-    VkPipelineShaderStageCreateInfo shaderStageCreateInfoRelu{};
-    shaderStageCreateInfoRelu.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-    shaderStageCreateInfoRelu.stage = VK_SHADER_STAGE_COMPUTE_BIT;
-    shaderStageCreateInfoRelu.module = shaderModuleRelu;
-    shaderStageCreateInfoRelu.pName = "main";
-    shaderStageCreateInfoRelu.pSpecializationInfo = &specializationInfoRelu;
+    VkPipelineShaderStageCreateInfo shaderStageCreateInfoL{};
+    shaderStageCreateInfoL.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    shaderStageCreateInfoL.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+    shaderStageCreateInfoL.module = shaderModuleL;
+    shaderStageCreateInfoL.pName = "main";
+    shaderStageCreateInfoL.pSpecializationInfo = &specializationInfoL;
 
-    VkPipelineLayout pipelineLayoutRelu{};
+    VkPipelineLayout pipelineLayoutL{};
     VkPipelineLayoutCreateInfo pipelineLayoutCreateInfo{};
     pipelineLayoutCreateInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
     pipelineLayoutCreateInfo.setLayoutCount = 1;
     pipelineLayoutCreateInfo.pSetLayouts = &descriptorSetLayout;
-    res = vkCreatePipelineLayout(device, &pipelineLayoutCreateInfo, nullptr, &pipelineLayoutRelu);
+    res = vkCreatePipelineLayout(device, &pipelineLayoutCreateInfo, nullptr, &pipelineLayoutL);
     assert(res == VK_SUCCESS);
 
     VkPipeline pipeline{};
     VkComputePipelineCreateInfo computePipelineCreateInfo{};
-    computePipelineCreateInfo.stage = shaderStageCreateInfoRelu;
-    computePipelineCreateInfo.layout = pipelineLayoutRelu;
+    computePipelineCreateInfo.stage = shaderStageCreateInfoL;
+    computePipelineCreateInfo.layout = pipelineLayoutL;
     computePipelineCreateInfo.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
     res = vkCreateComputePipelines(device, NULL, 1, &computePipelineCreateInfo, nullptr, &pipeline);
     assert(res == VK_SUCCESS);
 
-    VkCommandPool commandPool{};
     VkCommandPoolCreateInfo commandPoolCreateInfo{};
-    commandPoolCreateInfo.queueFamilyIndex = queueFamilyIndex;
-    commandPoolCreateInfo.flags = 0;
     commandPoolCreateInfo.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+    commandPoolCreateInfo.queueFamilyIndex = queueFamilyIndex;
+    VkCommandPool commandPool{};
     res = vkCreateCommandPool(device, &commandPoolCreateInfo, nullptr, &commandPool);
     assert(res == VK_SUCCESS);
-
     VkCommandBufferAllocateInfo commandBufferAllocateInfo{};
-    commandBufferAllocateInfo.commandBufferCount = 1;
+    commandBufferAllocateInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
     commandBufferAllocateInfo.commandPool = commandPool;
     commandBufferAllocateInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-    commandBufferAllocateInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
-
+    commandBufferAllocateInfo.commandBufferCount = 1;
     VkCommandBuffer commandBuffer{};
     res = vkAllocateCommandBuffers(device, &commandBufferAllocateInfo, &commandBuffer);
     assert(res == VK_SUCCESS);
 
-    VkCommandBufferBeginInfo commandBufferBeginInfo{};
-    commandBufferBeginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-    commandBufferBeginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-    res = vkBeginCommandBuffer(commandBuffer, &commandBufferBeginInfo);
+    VkCommandBufferBeginInfo beginInfo{};
+    beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    res = vkBeginCommandBuffer(commandBuffer, &beginInfo);
     assert(res == VK_SUCCESS);
 
-    VkBufferCopy copyRegion{};
-    copyRegion.srcOffset = 0;
-    copyRegion.dstOffset = 0;
-    copyRegion.size = bufferSize;
-    vkCmdCopyBuffer(commandBuffer, stagingBuffer, buffer, 1, &copyRegion);
-
     vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
-    vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipelineLayoutRelu, 0, 1, &descriptorSet, 0, NULL);
+    vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipelineLayoutL, 0, 1, &descriptorSet, 0, nullptr);
 
-    vkCmdDispatch(commandBuffer, (LOr + 15) / 16, 1, 1);
+    vkCmdDispatch(commandBuffer, (T2c + 15) / 16, (T1r + 15) / 16, 1);
+    
     res = vkEndCommandBuffer(commandBuffer);
     assert(res == VK_SUCCESS);
 
@@ -839,16 +614,116 @@ std::vector<float> relu(VkDevice device, VkPhysicalDevice physicalDevice, VkQueu
     assert(res == VK_SUCCESS);
 
     vkDestroyFence(device, fence, nullptr);
-
-    void* mappedMemory = NULL;
-    vkMapMemory(device, memory, 0, bufferSize, 0, &mappedMemory);
-    float* mappedResults = (float*)((char*)mappedMemory);
-
-    std::vector<float> result(mappedResults, mappedResults + outputSize);
-
-    return result;
 }
 
+void relu(
+    const std::string& shader_file_name,
+    VkBuffer &buffer, 
+    VkDeviceMemory &memory, 
+    VkBuffer &stagingBuffer, 
+    VkDevice device, 
+    const uint32_t bufferSize, 
+    VkPhysicalDevice physicalDevice, 
+    VkQueue queue, 
+    VkDescriptorSetLayout descriptorSetLayout, 
+    VkDescriptorSet& descriptorSet, 
+    VkDescriptorSetAllocateInfo descriptorSetAllocateInfo,
+    uint32_t queueFamilyIndex, 
+    VkResult res, 
+    uint32_t t1Size, 
+    uint32_t t1Offset,
+    uint32_t T1r, 
+    uint32_t T1c
+) {
+    updateDescriptorSetRelu(device, descriptorSet, buffer, t1Size, t1Offset);
+
+    auto computeShaderCodeL = readSPV(shader_file_name);
+
+    VkShaderModule shaderModuleL{};
+    VkShaderModuleCreateInfo shaderModuleCreateInfoL{};
+    shaderModuleCreateInfoL.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+    shaderModuleCreateInfoL.codeSize = computeShaderCodeL.size();
+    shaderModuleCreateInfoL.pCode = reinterpret_cast<const uint32_t*>(computeShaderCodeL.data());
+    res = vkCreateShaderModule(device, &shaderModuleCreateInfoL, nullptr, &shaderModuleL);
+    assert(res == VK_SUCCESS);
+
+    SpecializationDataRelu specDataL{};
+    VkSpecializationMapEntry specializationMapEntriesL[2]{};
+    VkSpecializationInfo specializationInfoL{};
+    createSpecializationMapEntriesRelu(&specializationInfoL, specDataL, specializationMapEntriesL, T1r, T1c);
+
+    VkPipelineShaderStageCreateInfo shaderStageCreateInfoL{};
+    shaderStageCreateInfoL.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    shaderStageCreateInfoL.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+    shaderStageCreateInfoL.module = shaderModuleL;
+    shaderStageCreateInfoL.pName = "main";
+    shaderStageCreateInfoL.pSpecializationInfo = &specializationInfoL;
+
+    VkPipelineLayout pipelineLayoutL{};
+    VkPipelineLayoutCreateInfo pipelineLayoutCreateInfo{};
+    pipelineLayoutCreateInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+    pipelineLayoutCreateInfo.setLayoutCount = 1;
+    pipelineLayoutCreateInfo.pSetLayouts = &descriptorSetLayout;
+    res = vkCreatePipelineLayout(device, &pipelineLayoutCreateInfo, nullptr, &pipelineLayoutL);
+    assert(res == VK_SUCCESS);
+
+    VkPipeline pipeline{};
+    VkComputePipelineCreateInfo computePipelineCreateInfo{};
+    computePipelineCreateInfo.stage = shaderStageCreateInfoL;
+    computePipelineCreateInfo.layout = pipelineLayoutL;
+    computePipelineCreateInfo.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
+    res = vkCreateComputePipelines(device, NULL, 1, &computePipelineCreateInfo, nullptr, &pipeline);
+    assert(res == VK_SUCCESS);
+
+    VkCommandPoolCreateInfo commandPoolCreateInfo{};
+    commandPoolCreateInfo.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+    commandPoolCreateInfo.queueFamilyIndex = queueFamilyIndex;
+    VkCommandPool commandPool{};
+    res = vkCreateCommandPool(device, &commandPoolCreateInfo, nullptr, &commandPool);
+    assert(res == VK_SUCCESS);
+    VkCommandBufferAllocateInfo commandBufferAllocateInfo{};
+    commandBufferAllocateInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+    commandBufferAllocateInfo.commandPool = commandPool;
+    commandBufferAllocateInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    commandBufferAllocateInfo.commandBufferCount = 1;
+    VkCommandBuffer commandBuffer{};
+    res = vkAllocateCommandBuffers(device, &commandBufferAllocateInfo, &commandBuffer);
+    assert(res == VK_SUCCESS);
+
+    VkCommandBufferBeginInfo beginInfo{};
+    beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    res = vkBeginCommandBuffer(commandBuffer, &beginInfo);
+    assert(res == VK_SUCCESS);
+
+    vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
+    vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipelineLayoutL, 0, 1, &descriptorSet, 0, nullptr);
+
+    vkCmdDispatch(commandBuffer, (T1r + 15) / 16, 1, 1);
+    
+    res = vkEndCommandBuffer(commandBuffer);
+    assert(res == VK_SUCCESS);
+
+    VkSubmitInfo submitInfo{};
+    submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    submitInfo.commandBufferCount = 1;
+    submitInfo.pCommandBuffers = &commandBuffer;
+
+    VkFence fence{};
+    VkFenceCreateInfo fenceCreateInfo{};
+    fenceCreateInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+    fenceCreateInfo.flags = 0;
+    res = vkCreateFence(device, &fenceCreateInfo, nullptr, &fence);
+    assert(res == VK_SUCCESS);
+
+    res = vkQueueSubmit(queue, 1, &submitInfo, fence);
+    assert(res == VK_SUCCESS);
+
+    res = vkWaitForFences(device, 1, &fence, VK_TRUE, 100000000000);
+    assert(res == VK_SUCCESS);
+
+    vkDestroyFence(device, fence, nullptr);
+}
 
 int main(int argc, char* argv[]) {    
     if (argc < 2) {
@@ -856,7 +731,6 @@ int main(int argc, char* argv[]) {
         return 1; 
     }
 
-    const uint N = 10;
     std::string linear1_w_filename = "../nn_models/linear1_w.bin";
     std::string linear1_b_filename = "../nn_models/linear1_b.bin";
     std::string linear2_w_filename = "../nn_models/linear2_w.bin";
@@ -896,7 +770,8 @@ int main(int argc, char* argv[]) {
     const uint LB2r = 10;
     const uint LB2c = 1;
 
-    std::vector<float> flatOutput(N, 0.0f);
+    const uint LO2r = 10;
+    const uint LO2c = 1;
 
     VkResult res;
     VkInstance instance;
@@ -916,26 +791,222 @@ int main(int argc, char* argv[]) {
     VkQueue queue{};
     vkGetDeviceQueue(device, queueFamilyIndex, 0, &queue);
     
-    std::vector<float> linear1_o = linearW(device, physicalDevice, queue, queueFamilyIndex, res, linear1_w, input_tensor, LW1r, LW1c, INr, INc);
-    linear1_o = linearB(device, physicalDevice, queue, queueFamilyIndex, res, linear1_b, linear1_o, LB1r, LB1c, LO1r, LO1c);
-    linear1_o = relu(device, physicalDevice, queue, queueFamilyIndex, res, linear1_o, LO1r, LO1c);
+    VkBuffer buffer{};
+    VkDeviceMemory memory{};
+    VkBuffer stagingBuffer{};
 
-    std::vector<float> linear2_o = linearW(device, physicalDevice, queue, queueFamilyIndex, res, linear2_w, linear1_o, LW2r, LW2c, LO1r, LO1c);
-    linear2_o = linearB(device, physicalDevice, queue, queueFamilyIndex, res, linear2_b, linear2_o, LB2r, LB2c, LB2r, LB2c);
+    const uint outputSizeL1 = LW1r * INc;
+    const uint outputSizeL2 = LW2r * LO1c;
+
+    // (linear1_w.size() + input_tensor.size() + outputSizeL1 + linear1_b.size() + linear2_w.size() + linear2_b.size() + outputSizeL2)
+    const uint32_t bufferSize = (linear1_w.size() + input_tensor.size() + linear1_b.size() + outputSizeL1 + linear2_w.size() + linear2_b.size() + outputSizeL2) * sizeof(float);
+
+    initializeBufferMemDesc(
+        device, 
+        physicalDevice, 
+        queue, 
+        queueFamilyIndex,
+        bufferSize,
+        res,
+        linear1_w, 
+        input_tensor, 
+        linear1_b,
+        linear2_w, 
+        linear2_b,
+        outputSizeL1,
+        outputSizeL2,
+        buffer, 
+        memory
+    );
+
+    VkDescriptorSetLayout descriptorSetLayoutLinear{};
+    VkDescriptorPool descriptorPoolLinear{};
+    VkDescriptorSet descriptorSetLinear{};
+    VkDescriptorSetAllocateInfo descriptorSetAllocateInfoLinear{};
+
+    createDescriptorSetLinear(
+        device, 
+        descriptorSetLayoutLinear, 
+        descriptorPoolLinear, 
+        descriptorSetLinear, 
+        descriptorSetAllocateInfoLinear,
+        res
+    );  
+
+    res = vkAllocateDescriptorSets(device, &descriptorSetAllocateInfoLinear, &descriptorSetLinear);
+    assert(res == VK_SUCCESS);
+
+    VkDescriptorSetLayout descriptorSetLayoutRelu{};
+    VkDescriptorPool descriptorPoolRelu{};
+    VkDescriptorSet descriptorSetRelu{};
+    VkDescriptorSetAllocateInfo descriptorSetAllocateInfoRelu{};
+
+    createDescriptorSetRelu(
+        device, 
+        descriptorSetLayoutRelu, 
+        descriptorPoolRelu, 
+        descriptorSetRelu, 
+        descriptorSetAllocateInfoRelu,
+        res
+    );
+    
+    res = vkAllocateDescriptorSets(device, &descriptorSetAllocateInfoRelu, &descriptorSetRelu);
+    assert(res == VK_SUCCESS);
+
+    uint32_t offsetLinear1W = 0;
+    uint32_t offsetInput = offsetLinear1W + linear1_w.size();
+    uint32_t offsetOutputL1 = offsetInput + input_tensor.size();
+    uint32_t offsetLinear1B = offsetOutputL1 + outputSizeL1;
+    uint32_t offsetLinear2W = offsetLinear1B + linear1_b.size();
+    uint32_t offsetLinear2B = offsetLinear2W + linear2_w.size();
+    uint32_t offsetOutputL2 = offsetLinear2B + linear2_b.size();
+    
+    // linear 1
+    linearOperation(
+        "MNIST-linear_w.spv",
+        buffer, 
+        memory, 
+        stagingBuffer, 
+        device, 
+        bufferSize, 
+        physicalDevice, 
+        queue, 
+        descriptorSetLayoutLinear,
+        descriptorSetLinear,
+        descriptorSetAllocateInfoLinear,
+        queueFamilyIndex, 
+        res, 
+        linear1_w.size(),
+        offsetLinear1W,
+        input_tensor.size(),
+        offsetInput,
+        outputSizeL1,
+        offsetOutputL1,
+        LW1r, 
+        LW1c, 
+        INr, 
+        INc
+    );
+
+    // bias 1
+    linearOperation(
+        "MNIST-linear_b.spv",
+        buffer, 
+        memory, 
+        stagingBuffer, 
+        device, 
+        bufferSize, 
+        physicalDevice, 
+        queue, 
+        descriptorSetLayoutLinear,
+        descriptorSetLinear,
+        descriptorSetAllocateInfoLinear,
+        queueFamilyIndex, 
+        res, 
+        linear1_b.size(),
+        offsetLinear1B,
+        outputSizeL1,
+        offsetOutputL1,
+        outputSizeL1,
+        offsetOutputL1,
+        LW1r, 
+        LW1c, 
+        LO1r, 
+        LO1c
+    );
+
+    // relu 1
+    relu(
+        "MNIST-relu.spv",
+        buffer, 
+        memory, 
+        stagingBuffer, 
+        device, 
+        bufferSize, 
+        physicalDevice, 
+        queue, 
+        descriptorSetLayoutRelu,
+        descriptorSetRelu,
+        descriptorSetAllocateInfoRelu,
+        queueFamilyIndex, 
+        res, 
+        outputSizeL1,
+        offsetOutputL1,
+        LO1r, 
+        LO1c
+    );
+
+    // linear 2
+    linearOperation(
+        "MNIST-linear_w.spv",
+        buffer, 
+        memory, 
+        stagingBuffer, 
+        device, 
+        bufferSize, 
+        physicalDevice, 
+        queue, 
+        descriptorSetLayoutLinear,
+        descriptorSetLinear,
+        descriptorSetAllocateInfoLinear,
+        queueFamilyIndex, 
+        res, 
+        linear2_w.size(),
+        offsetLinear2W,
+        outputSizeL1,
+        offsetOutputL1,
+        outputSizeL2,
+        offsetOutputL2,
+        LW2r, 
+        LW2c, 
+        LO1r, 
+        LO1c
+    );
+
+    // bias 2
+    linearOperation(
+        "MNIST-linear_b.spv",
+        buffer, 
+        memory, 
+        stagingBuffer, 
+        device, 
+        bufferSize, 
+        physicalDevice, 
+        queue, 
+        descriptorSetLayoutLinear,
+        descriptorSetLinear,
+        descriptorSetAllocateInfoLinear,
+        queueFamilyIndex, 
+        res, 
+        linear2_b.size(),
+        offsetLinear2B,
+        outputSizeL2,
+        offsetOutputL2,
+        outputSizeL2,
+        offsetOutputL2,
+        LW2r, 
+        LW2c, 
+        LB2r, 
+        LB2c
+    );
 
     std::cout << "OK: " << res << std::endl;
 
+    void* mappedMemory = NULL;
+    vkMapMemory(device, memory, 0, bufferSize, 0, &mappedMemory);
+    float* mappedResults = (float*)((char*)mappedMemory + (offsetOutputL2 * sizeof(float)));
+
     std::cout << "Result values: " << std::endl;
-    for (uint32_t i = 0; i < linear2_o.size(); ++i) {
-        std::cout << linear2_o[i] << ", ";
+    for (uint32_t i = 0; i < LO2r * LO2c; ++i) {
+        std::cout << mappedResults[i] << ", ";
     }
     std::cout << std::endl;
 
     uint predicted_label = 0;
-    float max_value = linear2_o[0];
-    for (uint32_t i = 1; i < linear2_o.size(); ++i) {
-        if (linear2_o[i] > max_value) {
-            max_value = linear2_o[i];
+    float max_value = mappedResults[0];
+    for (uint32_t i = 1; i < LO2r * LO2c; ++i) {
+        if (mappedResults[i] > max_value) {
+            max_value = mappedResults[i];
             predicted_label = i;
         }
     }

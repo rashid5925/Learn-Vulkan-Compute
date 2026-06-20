@@ -24,11 +24,6 @@ void main() {
     if (row >= T1r || col >= T2c) {
         return;
     }
-
-    float sum = 0.0f;
-    for (uint i = 0; i < T1c; ++i) {
-        sum += a[row * T1c + i] * b[i * T2c + col];
-    }
     
-    c[row * T2c + col] = sum;
+    c[row * T2c + col] = a[row * T1c + col] + b[row * T2c + col];
 }
